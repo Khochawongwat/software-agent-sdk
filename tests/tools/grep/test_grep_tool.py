@@ -329,6 +329,6 @@ def test_grep_tool_truncation():
         content = observation.to_llm_content
         text = content[0].text
         assert text.endswith(
-            "[Showing the first 100 of 150 matches. All matches by top-level "
-            "folder: (top level) 150. Narrow the pattern or search one folder.]"
+            "[Showing the first 100 of 150 matches. All matches by folder: "
+            "(files directly in it) 150. Narrow the pattern or search one folder.]"
         )

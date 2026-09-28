@@ -1,5 +1,6 @@
 """Shared utilities."""
 
+import os
 import shutil
 import subprocess
 from collections import Counter
@@ -63,23 +64,28 @@ def _log_ripgrep_fallback_warning(tool_name: str, fallback_method: str) -> None:
 
 
 def truncation_note(paths: list[str], search_path: Path, shown: int) -> str:
-    """How a result cut to its first ``shown`` paths spreads over the search
-    path's top-level folders, so an agent sees where all the matches are and
-    not only the first ones (in a fresh checkout, "first" by modification time
-    is simply the files written last). Empty when nothing was cut."""
+    """How a result cut to its first ``shown`` paths spreads over folders, so an
+    agent sees where all the matches are and not only the first ones (in a fresh
+    checkout, "first" by modification time is simply the files written last).
+    Counts start below the folder all matches share, so a search in a workspace
+    holding one repo counts that repo's folders. Empty when nothing was cut."""
     if len(paths) <= shown:
         return ""
+    shared = Path(os.path.commonpath(paths))
     counts: Counter[str] = Counter()
     for path in paths:
+        parts = Path(path).relative_to(shared).parts
+        folder = shared / parts[0] if len(parts) > 1 else None
+        if folder is None:
+            counts["(files directly in it)"] += 1
+            continue
         try:
-            parts = Path(path).relative_to(search_path).parts
+            counts[f"{folder.relative_to(search_path)}/"] += 1
         except ValueError:
-            parts = ()
-        counts[parts[0] + "/" if len(parts) > 1 else "(top level)"] += 1
+            counts[f"{folder}/"] += 1
     listed = ", ".join(f"{folder} {n}" for folder, n in counts.most_common(20))
     more = f", and {len(counts) - 20} more folders" if len(counts) > 20 else ""
     return (
         f"[Showing the first {shown} of {len(paths)} matches. All matches by "
-        f"top-level folder: {listed}{more}. Narrow the pattern or search one "
-        "folder.]"
+        f"folder: {listed}{more}. Narrow the pattern or search one folder.]"
     )
