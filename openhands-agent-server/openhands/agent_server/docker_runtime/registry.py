@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import subprocess
 import time
@@ -14,6 +15,8 @@ from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import UUID
+
+import httpx
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.conversation_registry import ConversationRegistry
@@ -47,6 +50,7 @@ _CONVERSATION_LABEL = "ai.openhands.conversation-id"
 # killed) is reported as an error instead of staying "available".
 # ponytail: polling can't tell the exit code or OOM; `docker events` can.
 _WATCH_INTERVAL_SECONDS = 10.0
+_RESUME_AT_MOST_EVERY_SECONDS = 3600.0
 _CONTAINER_EXITED = ConversationRuntimeError(
     code="container_exited",
     message="The conversation's container stopped unexpectedly.",
@@ -102,6 +106,8 @@ class DockerConversationRegistry(ConversationRegistry):
         self._eviction_task: asyncio.Task[None] | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._crashed: dict[UUID, ConversationRuntimeError] = {}
+        self._resumed: dict[UUID, float] = {}
+        self._resumes: set[asyncio.Task[None]] = set()
 
     def configure_service(self, service: ConversationService) -> None:
         self._service = service
@@ -145,6 +151,8 @@ class DockerConversationRegistry(ConversationRegistry):
     async def start(self) -> None:
         await asyncio.to_thread(self.cleanup_stale_containers)
         self._watch_task = asyncio.create_task(self._watch_containers_loop())
+        for conversation_id in self._take_interrupted():
+            self._resume_later(conversation_id)
         if self.config.conversation_idle_ttl_seconds:
             self._eviction_task = asyncio.create_task(self._evict_idle_runtimes_loop())
 
@@ -308,6 +316,8 @@ class DockerConversationRegistry(ConversationRegistry):
             await asyncio.to_thread(container.stop)
 
     async def shutdown(self) -> None:
+        if self.config.conversation_resume_message:
+            await self._remember_interrupted()
         for name in ("_eviction_task", "_watch_task"):
             task = getattr(self, name)
             if task is not None:
@@ -361,7 +371,86 @@ class DockerConversationRegistry(ConversationRegistry):
                 self._crashed[conversation_id] = _CONTAINER_EXITED
         for conversation_id in dead:
             logger.warning("Conversation container for %s exited", conversation_id)
+            if self.config.conversation_resume_message and self._service is not None:
+                info = await self._service.get_conversation(conversation_id)
+                if info is not None and (
+                    info.execution_status == ConversationExecutionStatus.RUNNING
+                ):
+                    self._resume_later(conversation_id)
         return dead
+
+    # Resuming interrupted turns (``conversation_resume_message``).
+
+    @property
+    def _interrupted_path(self) -> Path:
+        return self.provisioning.control_root / "interrupted.json"
+
+    async def _turn_running(
+        self, conversation_id: UUID, container: ConversationContainer
+    ) -> bool:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(
+                f"{container.host}/api/conversations/{conversation_id}",
+                headers={"X-Session-API-Key": container.api_key},
+            )
+        return response.json().get("execution_status") == (
+            ConversationExecutionStatus.RUNNING.value
+        )
+
+    async def _remember_interrupted(self) -> None:
+        """Before stopping: note the conversations that are running a turn."""
+        containers = list(self._containers.items())
+        running = await asyncio.gather(
+            *(self._turn_running(cid, container) for cid, container in containers),
+            return_exceptions=True,
+        )
+        ids = [str(cid) for (cid, _), on in zip(containers, running) if on is True]
+        await asyncio.to_thread(self._interrupted_path.write_text, json.dumps(ids))
+
+    def _take_interrupted(self) -> list[UUID]:
+        """The conversations noted at the last stop, once."""
+        path = self._interrupted_path
+        if not self.config.conversation_resume_message or not path.is_file():
+            return []
+        ids = [UUID(value) for value in json.loads(path.read_text())]
+        path.unlink()
+        return ids
+
+    def _resume_later(self, conversation_id: UUID) -> None:
+        now = time.monotonic()
+        last = self._resumed.get(conversation_id)
+        if last is not None and now - last < _RESUME_AT_MOST_EVERY_SECONDS:
+            logger.warning("Not resuming %s again within the hour", conversation_id)
+            return
+        self._resumed[conversation_id] = now
+        task = asyncio.create_task(self._resume(conversation_id))
+        self._resumes.add(task)
+        task.add_done_callback(self._resumes.discard)
+
+    async def _resume(self, conversation_id: UUID) -> None:
+        try:
+            container = await self.get_or_create(conversation_id)
+            await self._send_message(
+                container, conversation_id, self.config.conversation_resume_message
+            )
+            logger.info("Resumed interrupted conversation %s", conversation_id)
+        except Exception:
+            logger.exception("Could not resume conversation %s", conversation_id)
+
+    async def _send_message(
+        self, container: ConversationContainer, conversation_id: UUID, text: str | None
+    ) -> None:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{container.host}/api/conversations/{conversation_id}/events",
+                headers={"X-Session-API-Key": container.api_key},
+                json={
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}],
+                    "run": True,
+                },
+            )
+        response.raise_for_status()
 
     async def _evict_idle_runtimes_loop(self) -> None:
         ttl = self.config.conversation_idle_ttl_seconds
