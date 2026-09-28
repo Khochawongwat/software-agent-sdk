@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 import warnings
 from pathlib import Path
@@ -65,8 +66,13 @@ class CredentialStore:
     def credentials_dir(self) -> Path:
         """Get the credentials directory, creating it if necessary."""
         self._credentials_dir.mkdir(parents=True, exist_ok=True)
-        # Set directory permissions to owner-only (rwx------)
-        if os.name != "nt":
+        # Set directory permissions to owner-only (rwx------), only when they
+        # differ: this runs on every read, and a directory mounted from another
+        # user's host folder can refuse the chmod even when it is already 0700.
+        if (
+            os.name != "nt"
+            and stat.S_IMODE(self._credentials_dir.stat().st_mode) != 0o700
+        ):
             self._credentials_dir.chmod(0o700)
         return self._credentials_dir
 

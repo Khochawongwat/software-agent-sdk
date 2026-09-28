@@ -194,3 +194,27 @@ def test_credential_store_update_tokens_nonexistent(tmp_path):
         expires_in=3600,
     )
     assert result is None
+
+
+def test_credential_store_reads_an_owner_only_dir_without_chmod(tmp_path, monkeypatch):
+    """A mounted dir can refuse chmod even when it is already 0700."""
+    creds_dir = tmp_path / "auth"
+    creds_dir.mkdir(mode=0o700)
+    creds_dir.chmod(0o700)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(Path, "chmod", refuse)
+
+    assert CredentialStore(credentials_dir=creds_dir).get("openai") is None
+
+
+def test_credential_store_makes_a_wider_dir_owner_only(tmp_path):
+    creds_dir = tmp_path / "auth"
+    creds_dir.mkdir()
+    creds_dir.chmod(0o755)
+
+    CredentialStore(credentials_dir=creds_dir).get("openai")
+
+    assert oct(creds_dir.stat().st_mode & 0o777) == oct(0o700)
