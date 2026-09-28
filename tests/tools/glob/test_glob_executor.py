@@ -9,6 +9,7 @@ import pytest
 
 from openhands.tools.glob import GlobAction
 from openhands.tools.glob.impl import GlobExecutor
+from openhands.tools.utils import _check_ripgrep_available
 
 
 def test_glob_executor_initialization():
@@ -56,6 +57,19 @@ def test_glob_executor_recursive_pattern():
         assert observation.is_error is False
         assert len(observation.files) == 2
         assert all(f.endswith(".py") for f in observation.files)
+
+
+@pytest.mark.skipif(not _check_ripgrep_available(), reason="ripgrep not available")
+def test_glob_executor_pattern_with_a_folder_matches_under_the_search_path():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        (Path(temp_dir) / "src").mkdir()
+        (Path(temp_dir) / "src" / "app.ts").write_text("")
+        (Path(temp_dir) / "app.ts").write_text("")
+
+        executor = GlobExecutor(working_dir=temp_dir)
+        files, _ = executor._execute_with_ripgrep("src/*", Path(temp_dir))
+
+        assert files == [str((Path(temp_dir) / "src" / "app.ts").resolve())]
 
 
 def test_glob_executor_custom_path():

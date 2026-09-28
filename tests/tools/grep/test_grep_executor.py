@@ -6,8 +6,8 @@ These tests verify that grep behaves like OpenHands:
 - Sorted by modification time (--sortr=modified)
 """
 
+import os
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -138,6 +138,33 @@ def test_grep_executor_include_with_brace_group_matches_each_extension(backend):
         ]
 
 
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "_execute_with_ripgrep",
+        "_execute_with_system_grep",
+        "_execute_with_python_search",
+    ],
+)
+def test_grep_executor_include_with_a_folder_matches_under_the_search_path(backend):
+    if backend == "_execute_with_ripgrep" and not grep_impl._check_ripgrep_available():
+        pytest.skip("ripgrep not available")
+    if backend == "_execute_with_system_grep" and not _check_grep_available():
+        pytest.skip("grep not available")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        (Path(temp_dir) / "src").mkdir()
+        (Path(temp_dir) / "src" / "app.py").write_text("test")
+        (Path(temp_dir) / "app.py").write_text("test")
+
+        executor = GrepExecutor(working_dir=temp_dir)
+        action = GrepAction(pattern="test", include="src/*.py")
+        observation = getattr(executor, backend)(action, Path(temp_dir))
+
+        assert observation.matches == [
+            str((Path(temp_dir) / "src" / "app.py").resolve())
+        ]
+
+
 def test_grep_executor_custom_path():
     """Test search in custom directory."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,8 +270,11 @@ def test_grep_executor_sorting():
         new_file = Path(temp_dir) / "new.py"
 
         old_file.write_text("test")
-        time.sleep(0.01)
         new_file.write_text("test")
+        # Set the times, not sleep: a 10 ms sleep can leave both files with
+        # the same mtime on filesystems with coarse timestamps.
+        os.utime(old_file, (1_000_000, 1_000_000))
+        os.utime(new_file, (2_000_000, 2_000_000))
 
         executor = GrepExecutor(working_dir=temp_dir)
         action = GrepAction(pattern="test")

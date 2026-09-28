@@ -158,7 +158,8 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             "--sortr=modified",
         ]
 
-        # Execute ripgrep
+        # Execute ripgrep from the searched directory: it matches -g globs
+        # against paths relative to its working directory.
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -166,6 +167,7 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             timeout=30,
             check=False,
             env=sanitized_env(),
+            cwd=search_path,
         )
 
         # Parse output into file paths
