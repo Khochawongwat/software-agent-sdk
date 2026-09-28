@@ -476,6 +476,33 @@ async def proxy_workspace_file(
     )
 
 
+docker_runtime_router = APIRouter(prefix="/runtimes", tags=["Docker Runtimes"])
+
+
+@docker_runtime_router.api_route(
+    "/{conversation_id}/{tail:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+)
+async def proxy_runtime_api(
+    conversation_id: UUID, tail: str, request: Request
+) -> StreamingResponse:
+    """The conversation's own container API, for workspace calls.
+
+    ``/api/runtimes/{id}/api/bash/...`` reaches the container's
+    ``/api/bash/...``: listing files, git status and commands then run in the
+    conversation's container, on its /workspace, not on this server.
+    """
+    registry = get_registry(request)
+    container = await _container(registry, conversation_id)
+    return await _proxy_with_session(
+        registry,
+        conversation_id,
+        container,
+        request,
+        upstream_path=_upstream_path(request, "/" + tail),
+    )
+
+
 docker_sockets_router = APIRouter(prefix="/sockets", tags=["Docker WebSockets"])
 docker_session_sockets_router = APIRouter(prefix="/sockets", tags=["Docker WebSockets"])
 

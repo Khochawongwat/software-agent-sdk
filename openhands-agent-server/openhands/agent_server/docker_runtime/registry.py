@@ -145,10 +145,15 @@ class DockerConversationRegistry(ConversationRegistry):
                 runtime_status=ConversationRuntimeStatus.ERROR,
                 can_resume=True,
                 runtime_error=self._crashed[conversation_id],
+                workspace_url=f"/api/runtimes/{conversation_id}",
             )
         else:
             status = ConversationRuntimeStatus.MISSING
-        return ConversationRuntimeInfo(runtime_status=status, can_resume=True)
+        return ConversationRuntimeInfo(
+            runtime_status=status,
+            can_resume=True,
+            workspace_url=f"/api/runtimes/{conversation_id}",
+        )
 
     @property
     def serves_persisted_event_reads(self) -> bool:
@@ -165,6 +170,7 @@ class DockerConversationRegistry(ConversationRegistry):
     def add_execution_routes(self, router: APIRouter) -> None:
         from openhands.agent_server.docker_runtime.routers import (
             docker_conversation_router,
+            docker_runtime_router,
         )
         from openhands.agent_server.event_router import event_read_router
 
@@ -173,6 +179,7 @@ class DockerConversationRegistry(ConversationRegistry):
         # continue through the runtime proxy below.
         router.include_router(event_read_router)
         router.include_router(docker_conversation_router)
+        router.include_router(docker_runtime_router)
 
     @property
     def workspace_router(self) -> APIRouter:
