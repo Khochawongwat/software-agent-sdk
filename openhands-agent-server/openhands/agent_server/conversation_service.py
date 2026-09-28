@@ -795,13 +795,15 @@ class ConversationService:
         self, conversation_id: UUID
     ) -> ConversationState | None:
         base_state_file = self.conversations_dir / conversation_id.hex / BASE_STATE
-        if not base_state_file.exists():
+        try:
+            text = base_state_file.read_text()
+        except FileNotFoundError:
+            # Not written yet: a container-backed conversation saves it from
+            # the container once it starts, after the create call returns.
             return None
         cipher = self._cipher_for(conversation_id)
         context = {"cipher": cipher} if cipher else None
-        return ConversationState.model_validate_json(
-            base_state_file.read_text(), context=context
-        )
+        return ConversationState.model_validate_json(text, context=context)
 
     def _agent_from_base_state(self, conversation_id: UUID) -> AgentBase | None:
         """Return the persisted agent from ``base_state.json`` (its single source

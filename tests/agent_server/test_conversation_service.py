@@ -4274,3 +4274,18 @@ async def test_refresh_persisted_conversation_only_decrypts_requested_record(
         assert reads == [conversation_id]
         assert await service.get_conversation(conversation_id) is not None
         assert reads == [conversation_id]
+
+
+@pytest.mark.asyncio
+async def test_a_state_file_that_vanishes_while_read_is_treated_as_not_written_yet(
+    persisted_conversation,
+):
+    """A container-backed conversation's state can be missing when first read."""
+    conversations_dir, conversation_id = persisted_conversation
+    async with ConversationService(conversations_dir=conversations_dir) as service:
+        with patch(
+            "pathlib.Path.read_text", side_effect=FileNotFoundError("base_state.json")
+        ):
+            state = service._load_persisted_state_sync(conversation_id)
+
+    assert state is None
