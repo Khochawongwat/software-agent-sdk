@@ -556,3 +556,88 @@ async def test_after_a_new_container_a_normal_stop_is_not_an_error(
     assert runtime.runtime_info(conversation_id) == ConversationRuntimeInfo(
         runtime_status=ConversationRuntimeStatus.MISSING, can_resume=True
     )
+
+
+RESUME = "Continue where you left off."
+
+
+def resuming_runtime(tmp_path, monkeypatch, message: str | None = RESUME):
+    runtime = registry(tmp_path, monkeypatch, conversation_resume_message=message)
+    sent: list[tuple[UUID, str | None]] = []
+
+    async def send(container, conversation_id, text):
+        sent.append((conversation_id, text))
+
+    async def get_or_create(conversation_id):
+        return container(conversation_id)
+
+    monkeypatch.setattr(runtime, "_send_message", send)
+    monkeypatch.setattr(runtime, "get_or_create", get_or_create)
+    monkeypatch.setattr(ConversationContainer, "stop", lambda self: None)
+    return runtime, sent
+
+
+@pytest.mark.asyncio
+async def test_a_stop_notes_only_conversations_running_a_turn(tmp_path, monkeypatch):
+    runtime, _ = resuming_runtime(tmp_path, monkeypatch)
+    busy, idle = uuid4(), uuid4()
+    runtime._containers.update({busy: container(busy), idle: container(idle)})
+
+    async def turn_running(conversation_id, container):
+        return conversation_id == busy
+
+    monkeypatch.setattr(runtime, "_turn_running", turn_running)
+
+    await runtime.shutdown()
+
+    assert runtime._interrupted_path.read_text() == f'["{busy}"]'
+
+
+@pytest.mark.asyncio
+async def test_a_start_resumes_the_noted_conversations_once(tmp_path, monkeypatch):
+    runtime, sent = resuming_runtime(tmp_path, monkeypatch)
+    busy = uuid4()
+    runtime._interrupted_path.write_text(f'["{busy}"]')
+    monkeypatch.setattr(runtime, "cleanup_stale_containers", lambda: None)
+
+    await runtime.start()
+    await asyncio.gather(*runtime._resumes)
+
+    assert sent == [(busy, RESUME)]
+    assert runtime._interrupted_path.exists() is False
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_container_died_is_resumed_once_an_hour(
+    tmp_path, monkeypatch
+):
+    runtime, sent = resuming_runtime(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+    runtime.provisioning.create(conversation_id)
+    set_execution_status(runtime, ConversationExecutionStatus.RUNNING)
+    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set())
+
+    for _ in range(2):
+        runtime._containers[conversation_id] = container(conversation_id)
+        await runtime.check_containers()
+        await asyncio.gather(*runtime._resumes)
+
+    assert sent == [(conversation_id, RESUME)]
+
+
+@pytest.mark.asyncio
+async def test_without_a_resume_message_nothing_is_noted_or_resumed(
+    tmp_path, monkeypatch
+):
+    runtime, sent = resuming_runtime(tmp_path, monkeypatch, message=None)
+    conversation_id = uuid4()
+    runtime.provisioning.create(conversation_id)
+    set_execution_status(runtime, ConversationExecutionStatus.RUNNING)
+    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set())
+    runtime._containers[conversation_id] = container(conversation_id)
+
+    await runtime.check_containers()
+    await runtime.shutdown()
+
+    assert (sent, runtime._interrupted_path.exists()) == ([], False)

@@ -377,6 +377,14 @@ class Config(BaseModel):
             "keys, paths and HOME) cannot be overridden."
         ),
     )
+    conversation_resume_message: str | None = Field(
+        default=None,
+        description=(
+            "When set, a conversation interrupted mid-turn, because the server "
+            "stopped or its container died, is resumed by sending it this "
+            "message, at most once an hour. Unset, it stays paused or in error."
+        ),
+    )
 
     acp_skill_sourcing: ACPSkillSourcing = Field(
         default="native",
