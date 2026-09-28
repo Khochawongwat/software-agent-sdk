@@ -385,6 +385,18 @@ class Config(BaseModel):
             "message, at most once an hour. Unset, it stays paused or in error."
         ),
     )
+    conversation_workspace_command: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Command run before a new conversation's container starts, to give it "
+            "its own workspace (for example a clone of the requested repo). It "
+            "gets the requested working directory and the conversation id as its "
+            "last two arguments, and the request's tags as JSON in "
+            "OH_CONVERSATION_TAGS. The last line it prints is the absolute "
+            "directory to mount as /workspace. A failure rejects the start. Not "
+            "run when no working directory is requested."
+        ),
+    )
 
     acp_skill_sourcing: ACPSkillSourcing = Field(
         default="native",
