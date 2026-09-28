@@ -82,8 +82,23 @@ def test_glob_executor_cut_result_counts_every_match_by_top_level_folder():
         observation = GlobExecutor(working_dir=temp_dir)(GlobAction(pattern="**/*.ts"))
 
         assert observation.to_llm_content[0].text.endswith(
-            "[Showing the first 100 of 103 matches. All matches by top-level "
+            "[Showing the first 100 of 103 matches. All matches by "
             "folder: web/ 100, api/ 3. Narrow the pattern or search one folder.]"
+        )
+
+
+def test_glob_executor_cut_result_counts_below_the_folder_all_matches_share():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for folder, count in (("api", 3), ("web", 100)):
+            (Path(temp_dir) / "repo" / folder).mkdir(parents=True)
+            for i in range(count):
+                (Path(temp_dir) / "repo" / folder / f"f{i}.ts").write_text("")
+
+        observation = GlobExecutor(working_dir=temp_dir)(GlobAction(pattern="repo/**"))
+
+        assert observation.to_llm_content[0].text.endswith(
+            "[Showing the first 100 of 103 matches. All matches by folder: "
+            "repo/web/ 100, repo/api/ 3. Narrow the pattern or search one folder.]"
         )
 
 

@@ -175,7 +175,7 @@ def test_grep_executor_cut_result_counts_every_match_by_top_level_folder():
         observation = GrepExecutor(working_dir=temp_dir)(GrepAction(pattern="idea"))
 
         assert observation.to_llm_content[0].text.endswith(
-            "[Showing the first 100 of 103 matches. All matches by top-level "
+            "[Showing the first 100 of 103 matches. All matches by "
             "folder: web/ 100, api/ 3. Narrow the pattern or search one folder.]"
         )
 
