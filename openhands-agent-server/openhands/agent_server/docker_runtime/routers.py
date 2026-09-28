@@ -12,6 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from openhands.agent_server.config import Config
 from openhands.agent_server.dependencies import get_conversation_service
 from openhands.agent_server.docker_runtime.mediation import (
     materialize_secrets,
@@ -32,12 +33,18 @@ from openhands.agent_server.models import (
     ConversationRuntimeStatus,
     UpdateSecretsRequest,
 )
+from openhands.agent_server.persistence import get_llm_profile_store
 from openhands.agent_server.utils import safe_rmtree
+from openhands.sdk.conversation.request import StartConversationRequest
+from openhands.sdk.conversation.title_utils import generate_title_from_message
+from openhands.sdk.llm import LLM, TextContent
 from openhands.sdk.logger import get_logger
 from openhands.sdk.profiles.resolver import DanglingMcpServerRef, ProfileNotFound
 
 
 logger = get_logger(__name__)
+# Background title tasks, kept referenced until they finish.
+_background_tasks: set[asyncio.Task] = set()
 
 
 def get_registry(request: Request) -> DockerConversationRegistry:
@@ -97,6 +104,62 @@ async def _proxy_with_session(
         raise
 
 
+def _first_message_text(request: StartConversationRequest) -> str | None:
+    message = request.initial_message
+    if message is None:
+        return None
+    text = "\n".join(c.text for c in message.content if isinstance(c, TextContent))
+    return text.strip() or None
+
+
+def _title_llm(request: StartConversationRequest, config: Config) -> LLM | None:
+    """Pick the title LLM as a local conversation would: the title profile,
+    else the agent's LLM (None, or ACP's placeholder, means truncation). The
+    profile loads here, where profiles are stored; a container has none."""
+    if request.title_llm_profile:
+        try:
+            return get_llm_profile_store().load(
+                request.title_llm_profile, cipher=config.cipher
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning(
+                "Failed to load title LLM profile %r: %s. Falling back to the "
+                "agent's LLM.",
+                request.title_llm_profile,
+                exc,
+            )
+    return getattr(request.agent, "llm", None)
+
+
+async def _set_title(
+    service,
+    container: ConversationContainer,
+    conversation_id: UUID,
+    message: str,
+    request: StartConversationRequest,
+    config: Config,
+) -> None:
+    """Title the conversation from its first message, then save it through the
+    container's own API, so its meta.json and the outer catalog agree."""
+    try:
+        llm = await asyncio.to_thread(_title_llm, request, config)
+        title = await asyncio.to_thread(generate_title_from_message, message, llm, 50)
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.patch(
+                f"{container.host}/api/conversations/{conversation_id}",
+                headers={"X-Session-API-Key": container.api_key},
+                json={"title": title},
+            )
+            response.raise_for_status()
+        await service.refresh_persisted_conversation(conversation_id)
+    except Exception:
+        logger.warning(
+            "Auto-title generation failed for conversation %s",
+            conversation_id,
+            exc_info=True,
+        )
+
+
 docker_conversation_router = APIRouter(
     prefix="/conversations", tags=["Docker Conversations"]
 )
@@ -135,6 +198,10 @@ async def start_conversation(
     registry = get_registry(request)
     try:
         prepared, launched = await prepare_start(body, registry.config)
+        # The outer server titles the conversation (_set_title): the
+        # container has no LLM profiles to title it with.
+        title_message = _first_message_text(prepared) if prepared.autotitle else None
+        prepared = prepared.model_copy(update={"autotitle": False})
         identity = registry.provisioning.create(conversation_id, host_workspace)
         if launched is not None and identity.launched_agent_profile is None:
             identity = identity.model_copy(update={"launched_agent_profile": launched})
@@ -172,9 +239,21 @@ async def start_conversation(
         await registry.stop(conversation_id)
         content = {"detail": "Conversation runtime rejected the request"}
     else:
-        await get_conversation_service(request).refresh_persisted_conversation(
-            conversation_id
-        )
+        service = get_conversation_service(request)
+        await service.refresh_persisted_conversation(conversation_id)
+        if title_message:
+            task = asyncio.create_task(
+                _set_title(
+                    service,
+                    container,
+                    conversation_id,
+                    title_message,
+                    prepared,
+                    registry.config,
+                )
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
     return JSONResponse(content=content, status_code=response.status_code)
 
 

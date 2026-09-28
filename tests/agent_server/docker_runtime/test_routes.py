@@ -1,9 +1,11 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -14,6 +16,7 @@ from starlette.routing import Match
 
 from openhands.agent_server.api import create_app
 from openhands.agent_server.config import Config
+from openhands.agent_server.docker_runtime import routers
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.docker_runtime.registry import DockerConversationRegistry
 from openhands.agent_server.docker_runtime.routers import (
@@ -23,6 +26,7 @@ from openhands.agent_server.docker_runtime.routers import (
 )
 from openhands.agent_server.event_router import event_read_router
 from openhands.agent_server.models import UpdateSecretsRequest
+from openhands.sdk import LLM, Agent
 from openhands.sdk.profiles.agent_profile import LaunchedAgentProfile
 from openhands.sdk.secret import LookupSecret
 
@@ -418,3 +422,122 @@ async def test_secret_updates_are_materialized_and_profile_scoped(
     request.app.state.conversation_service.refresh_persisted_conversation.assert_awaited_once_with(
         conversation_id
     )
+
+
+class _FakeContainerHttp:
+    """httpx.AsyncClient stand-in: records calls to the conversation container."""
+
+    calls: ClassVar[list[tuple[str, str, Any]]] = []
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def post(self, url, json, **_kwargs):
+        self.calls.append(("POST", url, json))
+        return httpx.Response(201, json={"id": json["conversation_id"]})
+
+    async def patch(self, url, json, **_kwargs):
+        self.calls.append(("PATCH", url, json))
+        return httpx.Response(200, json={}, request=httpx.Request("PATCH", url))
+
+
+async def _start(tmp_path, monkeypatch, body):
+    monkeypatch.setenv("OH_PERSISTENCE_DIR", str(tmp_path / "persistence"))
+    config = Config(
+        conversations_path=tmp_path / "conversations",
+        secret_key=SecretStr("outer-key"),
+    )
+    registry = DockerConversationRegistry(config)
+
+    async def get_or_create(_conversation_id):
+        return SimpleNamespace(host="http://inner", api_key="inner-key")
+
+    monkeypatch.setattr(registry, "get_or_create", get_or_create)
+    service = AsyncMock()
+    _FakeContainerHttp.calls = []
+    monkeypatch.setattr(routers.httpx, "AsyncClient", _FakeContainerHttp)
+    payload = json.dumps(body).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/conversations",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "app": SimpleNamespace(
+                state=SimpleNamespace(
+                    conversation_registry=registry, conversation_service=service
+                )
+            ),
+        },
+        receive,
+    )
+    await routers.start_conversation(request, include_skills=False)
+    await asyncio.gather(*routers._background_tasks)
+    return service
+
+
+def _start_body(**extra):
+    return {
+        "conversation_id": "9e3a59c5-e149-4758-8aec-2833e585f8c2",
+        "agent": Agent(llm=LLM(model="agent-model")).model_dump(mode="json"),
+        "initial_message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "Fix the login page"}],
+        },
+        **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_outer_server_titles_a_docker_conversation_through_its_container(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        routers,
+        "generate_title_from_message",
+        lambda message, llm, max_length: f"Title for {message}",
+    )
+
+    service = await _start(tmp_path, monkeypatch, _start_body())
+
+    (_, _, started), patch = _FakeContainerHttp.calls
+    assert started["autotitle"] is False
+    assert patch == (
+        "PATCH",
+        "http://inner/api/conversations/9e3a59c5-e149-4758-8aec-2833e585f8c2",
+        {"title": "Title for Fix the login page"},
+    )
+    assert service.refresh_persisted_conversation.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_title_uses_the_outer_servers_title_profile(tmp_path, monkeypatch):
+    used = []
+    profile_llm = LLM(model="title-model", usage_id="title")
+
+    class Profiles:
+        def load(self, name, cipher=None):
+            assert name == "titles"
+            return profile_llm
+
+    monkeypatch.setattr(routers, "get_llm_profile_store", lambda: Profiles())
+    monkeypatch.setattr(
+        routers,
+        "generate_title_from_message",
+        lambda message, llm, max_length: used.append(llm.model) or "T",
+    )
+
+    await _start(tmp_path, monkeypatch, _start_body(title_llm_profile="titles"))
+
+    assert used == ["title-model"]
