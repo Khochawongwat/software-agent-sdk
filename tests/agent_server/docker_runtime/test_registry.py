@@ -15,7 +15,12 @@ from openhands.agent_server.docker_runtime.registry import (
     ConversationContainer,
     DockerConversationRegistry,
 )
-from openhands.agent_server.models import StartConversationRequest
+from openhands.agent_server.models import (
+    ConversationRuntimeError,
+    ConversationRuntimeInfo,
+    ConversationRuntimeStatus,
+    StartConversationRequest,
+)
 from openhands.sdk import LLM, Agent, Message, TextContent
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.security.confirmation_policy import NeverConfirm
@@ -485,3 +490,69 @@ def test_extra_mounts_and_env_reach_the_container_but_not_runtime_keys(
     assert env["OH_SECRET_KEY"] != "outer-secret"
     assert command.count("OH_SECRET_KEY") == 1
     assert "UNSET_NAME" not in command
+
+
+def test_container_is_named_after_its_conversation(tmp_path, monkeypatch):
+    runtime = registry(tmp_path, monkeypatch, conversation_container_network="runtimes")
+
+    conversation_id, command, _, result, _ = build_command(runtime, monkeypatch)
+
+    assert command[command.index("--name") + 1] == (
+        f"agent-server-conversation-{conversation_id}"
+    )
+    assert result.host == f"http://agent-server-conversation-{conversation_id}:8000"
+
+
+def crashed_runtime(tmp_path, monkeypatch):
+    runtime = registry(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+    runtime.provisioning.create(conversation_id)
+    runtime._containers[conversation_id] = container(conversation_id)
+    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set())
+    return runtime, conversation_id
+
+
+@pytest.mark.asyncio
+async def test_a_container_that_died_is_reported_as_an_error(tmp_path, monkeypatch):
+    runtime, conversation_id = crashed_runtime(tmp_path, monkeypatch)
+
+    assert await runtime.check_containers() == [conversation_id]
+    assert runtime.runtime_info(conversation_id) == ConversationRuntimeInfo(
+        runtime_status=ConversationRuntimeStatus.ERROR,
+        can_resume=True,
+        runtime_error=ConversationRuntimeError(
+            code="container_exited",
+            message="The conversation's container stopped unexpectedly.",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_container_the_runtime_stopped_is_not_an_error(tmp_path, monkeypatch):
+    runtime, conversation_id = crashed_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(ConversationContainer, "stop", lambda self: None)
+
+    await runtime.stop(conversation_id)
+
+    assert await runtime.check_containers() == []
+    assert (
+        runtime.runtime_info(conversation_id).runtime_status
+        == ConversationRuntimeStatus.MISSING
+    )
+
+
+@pytest.mark.asyncio
+async def test_after_a_new_container_a_normal_stop_is_not_an_error(
+    tmp_path, monkeypatch
+):
+    runtime, conversation_id = crashed_runtime(tmp_path, monkeypatch)
+    await runtime.check_containers()
+    runtime._build_container = lambda conversation_id: container(conversation_id)
+    monkeypatch.setattr(ConversationContainer, "stop", lambda self: None)
+
+    await runtime.get_or_create(conversation_id)
+    await runtime.stop(conversation_id)
+
+    assert runtime.runtime_info(conversation_id) == ConversationRuntimeInfo(
+        runtime_status=ConversationRuntimeStatus.MISSING, can_resume=True
+    )
