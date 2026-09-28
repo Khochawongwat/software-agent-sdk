@@ -180,8 +180,11 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
 
         filename = relative_parts[-1] if relative_parts else path.name
         if include_pattern:
+            # A pattern with a folder in it (``src/*.ts``) is matched against
+            # the path under the search directory, as ripgrep's -g does.
+            target = "/".join(relative_parts) if "/" in include_pattern else filename
             return any(
-                fnmatch.fnmatch(filename, include)
+                fnmatch.fnmatch(target, include)
                 for include in _expand_braces(include_pattern)
             )
         return not filename.startswith(".")
@@ -260,6 +263,8 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
         if action.include:
             cmd.extend(["-g", action.include])
 
+        # ripgrep matches -g globs against paths relative to its working
+        # directory, so run it from the searched one.
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -267,6 +272,7 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
             timeout=30,
             check=False,
             env=sanitized_env(),
+            cwd=search_path,
         )
 
         matches = []
