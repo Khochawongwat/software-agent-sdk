@@ -111,6 +111,33 @@ def test_grep_executor_include_filter():
         assert observation.matches[0].endswith(".py")
 
 
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "_execute_with_ripgrep",
+        "_execute_with_system_grep",
+        "_execute_with_python_search",
+    ],
+)
+def test_grep_executor_include_with_brace_group_matches_each_extension(backend):
+    if backend == "_execute_with_ripgrep" and not grep_impl._check_ripgrep_available():
+        pytest.skip("ripgrep not available")
+    if backend == "_execute_with_system_grep" and not _check_grep_available():
+        pytest.skip("grep not available")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for name in ("app.py", "app.ts", "notes.md"):
+            (Path(temp_dir) / name).write_text("test")
+
+        executor = GrepExecutor(working_dir=temp_dir)
+        action = GrepAction(pattern="test", include="*.{py,ts}")
+        observation = getattr(executor, backend)(action, Path(temp_dir))
+
+        assert sorted(Path(match).name for match in observation.matches) == [
+            "app.py",
+            "app.ts",
+        ]
+
+
 def test_grep_executor_custom_path():
     """Test search in custom directory."""
     with tempfile.TemporaryDirectory() as temp_dir:
