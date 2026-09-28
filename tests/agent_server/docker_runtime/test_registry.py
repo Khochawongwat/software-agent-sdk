@@ -702,3 +702,15 @@ async def test_a_resume_waits_until_the_new_container_has_loaded_the_conversatio
     await runtime._send_message(container(conversation_id), conversation_id, RESUME)
 
     assert calls == [("POST", 404), ("POST", 404), ("POST", 200)]
+
+
+def test_the_command_log_stays_out_of_the_mounted_workspace(tmp_path, monkeypatch):
+    runtime = registry(tmp_path, monkeypatch)
+
+    _, command, env, _, _ = build_command(runtime, monkeypatch)
+
+    assert env["OH_BASH_EVENTS_DIR"] == "/var/openhands/.openhands/bash_events"
+    assert ["-e", "OH_BASH_EVENTS_DIR"] == command[
+        command.index("OH_BASH_EVENTS_DIR") - 1 : command.index("OH_BASH_EVENTS_DIR")
+        + 1
+    ]
