@@ -24,6 +24,25 @@ from openhands.tools.utils import (
 
 logger = get_logger(__name__)
 
+_BRACE_GROUP = re.compile(r"\{([^{}]*)\}")
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """``*.{py,ts}`` -> ``["*.py", "*.ts"]``, as ripgrep's ``-g`` reads it.
+
+    ``fnmatch`` has no brace groups, so without this an include such as
+    ``*.{py,ts}`` matches nothing. Innermost groups expand first, so they nest.
+    """
+    group = _BRACE_GROUP.search(pattern)
+    if not group or "," not in group.group(1):
+        return [pattern]
+    head, tail = pattern[: group.start()], pattern[group.end() :]
+    return [
+        expanded
+        for alternative in group.group(1).split(",")
+        for expanded in _expand_braces(head + alternative + tail)
+    ]
+
 
 class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
     """Executor for grep content search operations.
@@ -161,7 +180,10 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
 
         filename = relative_parts[-1] if relative_parts else path.name
         if include_pattern:
-            return fnmatch.fnmatch(filename, include_pattern)
+            return any(
+                fnmatch.fnmatch(filename, include)
+                for include in _expand_braces(include_pattern)
+            )
         return not filename.startswith(".")
 
     def _match_mtime(self, path: Path) -> float:
