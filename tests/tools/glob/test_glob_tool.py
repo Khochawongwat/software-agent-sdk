@@ -386,4 +386,7 @@ def test_glob_tool_truncation():
         # Check LLM content mentions truncation
         content = observation.to_llm_content
         text_content = content[0].text
-        assert "Results truncated to first 100 files" in text_content
+        assert text_content.endswith(
+            "[Showing the first 100 of 150 matches. All matches by top-level "
+            "folder: (top level) 150. Narrow the pattern or search one folder.]"
+        )

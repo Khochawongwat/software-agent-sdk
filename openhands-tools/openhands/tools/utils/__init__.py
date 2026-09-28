@@ -2,7 +2,9 @@
 
 import shutil
 import subprocess
+from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 
 from openhands.sdk.logger import get_logger
 
@@ -57,4 +59,27 @@ def _log_ripgrep_fallback_warning(tool_name: str, fallback_method: str) -> None:
         f"Falling back to {fallback_method}. "
         f"For better performance, consider installing ripgrep: "
         f"https://github.com/BurntSushi/ripgrep#installation"
+    )
+
+
+def truncation_note(paths: list[str], search_path: Path, shown: int) -> str:
+    """How a result cut to its first ``shown`` paths spreads over the search
+    path's top-level folders, so an agent sees where all the matches are and
+    not only the first ones (in a fresh checkout, "first" by modification time
+    is simply the files written last). Empty when nothing was cut."""
+    if len(paths) <= shown:
+        return ""
+    counts: Counter[str] = Counter()
+    for path in paths:
+        try:
+            parts = Path(path).relative_to(search_path).parts
+        except ValueError:
+            parts = ()
+        counts[parts[0] + "/" if len(parts) > 1 else "(top level)"] += 1
+    listed = ", ".join(f"{folder} {n}" for folder, n in counts.most_common(20))
+    more = f", and {len(counts) - 20} more folders" if len(counts) > 20 else ""
+    return (
+        f"[Showing the first {shown} of {len(paths)} matches. All matches by "
+        f"top-level folder: {listed}{more}. Narrow the pattern or search one "
+        "folder.]"
     )

@@ -19,6 +19,7 @@ from openhands.tools.utils import (
     _check_grep_available,
     _check_ripgrep_available,
     _log_ripgrep_fallback_warning,
+    truncation_note,
 )
 
 
@@ -138,7 +139,7 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
         pattern: str,
         search_path: str,
         include_pattern: str | None,
-        truncated: bool,
+        truncated: str,
     ) -> str:
         """Format the grep observation output message."""
         if not matches:
@@ -157,10 +158,7 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
             f"'{pattern}' in '{search_path}'{include_info}:\n{file_list}"
         )
         if truncated:
-            output += (
-                "\n\n[Results truncated to first 100 files. "
-                "Consider using a more specific pattern.]"
-            )
+            output += f"\n\n{truncated}"
         return output
 
     def _path_matches_filters(
@@ -201,8 +199,9 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
         matches: list[Path],
         search_path: Path,
         include_pattern: str | None,
-    ) -> tuple[list[str], bool]:
-        """Filter, sort, and truncate raw match paths."""
+    ) -> tuple[list[str], str]:
+        """Filter, sort, and truncate raw match paths; the note is empty when
+        nothing was cut (see truncation_note)."""
         unique_matches: dict[str, Path] = {}
         for match in matches:
             try:
@@ -218,7 +217,9 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
             key=self._match_mtime,
             reverse=True,
         )
-        truncated = len(sorted_matches) > self._MAX_MATCHES
+        truncated = truncation_note(
+            [str(path) for path in sorted_matches], search_path, self._MAX_MATCHES
+        )
         return [str(path) for path in sorted_matches[: self._MAX_MATCHES]], truncated
 
     def _build_observation(
@@ -245,7 +246,7 @@ class GrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
             pattern=action.pattern,
             search_path=str(search_path),
             include_pattern=action.include,
-            truncated=truncated,
+            truncated=bool(truncated),
         )
 
     def _execute_with_ripgrep(

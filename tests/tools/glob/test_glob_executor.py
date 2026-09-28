@@ -72,6 +72,21 @@ def test_glob_executor_pattern_with_a_folder_matches_under_the_search_path():
         assert files == [str((Path(temp_dir) / "src" / "app.ts").resolve())]
 
 
+def test_glob_executor_cut_result_counts_every_match_by_top_level_folder():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for folder, count in (("api", 3), ("web", 100)):
+            (Path(temp_dir) / folder).mkdir()
+            for i in range(count):
+                (Path(temp_dir) / folder / f"f{i}.ts").write_text("")
+
+        observation = GlobExecutor(working_dir=temp_dir)(GlobAction(pattern="**/*.ts"))
+
+        assert observation.to_llm_content[0].text.endswith(
+            "[Showing the first 100 of 103 matches. All matches by top-level "
+            "folder: web/ 100, api/ 3. Narrow the pattern or search one folder.]"
+        )
+
+
 def test_glob_executor_custom_path():
     """Test glob with custom search path."""
     with tempfile.TemporaryDirectory() as temp_dir:

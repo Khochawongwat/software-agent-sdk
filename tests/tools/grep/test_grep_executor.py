@@ -165,6 +165,21 @@ def test_grep_executor_include_with_a_folder_matches_under_the_search_path(backe
         ]
 
 
+def test_grep_executor_cut_result_counts_every_match_by_top_level_folder():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for folder, count in (("api", 3), ("web", 100)):
+            (Path(temp_dir) / folder).mkdir()
+            for i in range(count):
+                (Path(temp_dir) / folder / f"f{i}.ts").write_text("idea")
+
+        observation = GrepExecutor(working_dir=temp_dir)(GrepAction(pattern="idea"))
+
+        assert observation.to_llm_content[0].text.endswith(
+            "[Showing the first 100 of 103 matches. All matches by top-level "
+            "folder: web/ 100, api/ 3. Narrow the pattern or search one folder.]"
+        )
+
+
 def test_grep_executor_custom_path():
     """Test search in custom directory."""
     with tempfile.TemporaryDirectory() as temp_dir:
