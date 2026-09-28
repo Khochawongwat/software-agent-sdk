@@ -107,6 +107,8 @@ class DockerConversationRegistry(ConversationRegistry):
         self._watch_task: asyncio.Task[None] | None = None
         self._crashed: dict[UUID, ConversationRuntimeError] = {}
         self._resumed: dict[UUID, float] = {}
+        # Conversations running a turn at the last check (resume on crash).
+        self._turns: set[UUID] = set()
         self._resumes: set[asyncio.Task[None]] = set()
 
     def configure_service(self, service: ConversationService) -> None:
@@ -371,13 +373,22 @@ class DockerConversationRegistry(ConversationRegistry):
                 self._crashed[conversation_id] = _CONTAINER_EXITED
         for conversation_id in dead:
             logger.warning("Conversation container for %s exited", conversation_id)
-            if self.config.conversation_resume_message and self._service is not None:
-                info = await self._service.get_conversation(conversation_id)
-                if info is not None and (
-                    info.execution_status == ConversationExecutionStatus.RUNNING
-                ):
-                    self._resume_later(conversation_id)
+            # A container saves its state at the end of a turn, so after a
+            # crash only this check's last answer shows the turn was running.
+            if conversation_id in self._turns:
+                self._resume_later(conversation_id)
+        if self.config.conversation_resume_message:
+            await self._note_turns()
         return dead
+
+    async def _note_turns(self) -> None:
+        """Ask each live container whether it is running a turn."""
+        containers = list(self._containers.items())
+        answers = await asyncio.gather(
+            *(self._turn_running(cid, container) for cid, container in containers),
+            return_exceptions=True,
+        )
+        self._turns = {cid for (cid, _), on in zip(containers, answers) if on is True}
 
     # Resuming interrupted turns (``conversation_resume_message``).
 
