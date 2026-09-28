@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import urlopen
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
 from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.models import (
+    ConversationRuntimeError,
     ConversationRuntimeInfo,
     ConversationRuntimeStatus,
 )
@@ -42,6 +43,14 @@ _PERSISTENCE_DIR = "/var/openhands/.openhands"
 _WORKSPACE_DIR = "/workspace"
 _OWNER_LABEL = "ai.openhands.runtime-owner"
 _CONVERSATION_LABEL = "ai.openhands.conversation-id"
+# How often running containers are checked, so one that died (out of memory,
+# killed) is reported as an error instead of staying "available".
+# ponytail: polling can't tell the exit code or OOM; `docker events` can.
+_WATCH_INTERVAL_SECONDS = 10.0
+_CONTAINER_EXITED = ConversationRuntimeError(
+    code="container_exited",
+    message="The conversation's container stopped unexpectedly.",
+)
 # Set by the runtime for each container; never taken from the server's env.
 _RUNTIME_ENV = (
     "HOME",
@@ -91,6 +100,8 @@ class DockerConversationRegistry(ConversationRegistry):
         self._last_access: dict[UUID, float] = {}
         self._sessions: dict[UUID, int] = {}
         self._eviction_task: asyncio.Task[None] | None = None
+        self._watch_task: asyncio.Task[None] | None = None
+        self._crashed: dict[UUID, ConversationRuntimeError] = {}
 
     def configure_service(self, service: ConversationService) -> None:
         self._service = service
@@ -113,16 +124,19 @@ class DockerConversationRegistry(ConversationRegistry):
                 runtime_status=ConversationRuntimeStatus.MISSING,
                 can_resume=False,
             )
-        return ConversationRuntimeInfo(
-            runtime_status=(
-                ConversationRuntimeStatus.AVAILABLE
-                if self.get(conversation_id)
-                else ConversationRuntimeStatus.STARTING
-                if self.is_starting(conversation_id)
-                else ConversationRuntimeStatus.MISSING
-            ),
-            can_resume=True,
-        )
+        if self.get(conversation_id):
+            status = ConversationRuntimeStatus.AVAILABLE
+        elif self.is_starting(conversation_id):
+            status = ConversationRuntimeStatus.STARTING
+        elif conversation_id in self._crashed:
+            return ConversationRuntimeInfo(
+                runtime_status=ConversationRuntimeStatus.ERROR,
+                can_resume=True,
+                runtime_error=self._crashed[conversation_id],
+            )
+        else:
+            status = ConversationRuntimeStatus.MISSING
+        return ConversationRuntimeInfo(runtime_status=status, can_resume=True)
 
     @property
     def serves_persisted_event_reads(self) -> bool:
@@ -130,6 +144,7 @@ class DockerConversationRegistry(ConversationRegistry):
 
     async def start(self) -> None:
         await asyncio.to_thread(self.cleanup_stale_containers)
+        self._watch_task = asyncio.create_task(self._watch_containers_loop())
         if self.config.conversation_idle_ttl_seconds:
             self._eviction_task = asyncio.create_task(self._evict_idle_runtimes_loop())
 
@@ -262,6 +277,7 @@ class DockerConversationRegistry(ConversationRegistry):
                 raise RuntimeError("Conversation container start was cancelled")
             self._starts.pop(conversation_id, None)
             self._containers[conversation_id] = container
+            self._crashed.pop(conversation_id, None)
             self._last_access[conversation_id] = time.monotonic()
             return container
 
@@ -292,13 +308,60 @@ class DockerConversationRegistry(ConversationRegistry):
             await asyncio.to_thread(container.stop)
 
     async def shutdown(self) -> None:
-        if self._eviction_task is not None:
-            self._eviction_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._eviction_task
-            self._eviction_task = None
+        for name in ("_eviction_task", "_watch_task"):
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, name, None)
         ids = set(self._containers) | set(self._starts)
         await asyncio.gather(*(self.stop(cid) for cid in ids), return_exceptions=True)
+
+    def _running_container_ids(self) -> set[str]:
+        result = execute_command(
+            [
+                "docker",
+                "ps",
+                "-q",
+                "--no-trunc",
+                "--filter",
+                f"label={_OWNER_LABEL}={self.owner}",
+            ]
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "docker ps failed")
+        return set(result.stdout.split())
+
+    async def _watch_containers_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_WATCH_INTERVAL_SECONDS)
+            try:
+                await self.check_containers()
+            except Exception:
+                logger.exception("error_checking_docker_runtimes")
+
+    async def check_containers(self) -> list[UUID]:
+        """Drop containers that died on their own; return their conversations.
+
+        A container the runtime stops is removed from the registry first, so
+        only an unexpected exit (out of memory, killed) is reported.
+        """
+        running = await asyncio.to_thread(self._running_container_ids)
+        async with self._lock:
+            dead = [
+                conversation_id
+                for conversation_id, container in self._containers.items()
+                if container.container_id not in running
+            ]
+            for conversation_id in dead:
+                self._containers.pop(conversation_id)
+                self._last_access.pop(conversation_id, None)
+                self._sessions.pop(conversation_id, None)
+                self._crashed[conversation_id] = _CONTAINER_EXITED
+        for conversation_id in dead:
+            logger.warning("Conversation container for %s exited", conversation_id)
+        return dead
 
     async def _evict_idle_runtimes_loop(self) -> None:
         ttl = self.config.conversation_idle_ttl_seconds
@@ -421,7 +484,10 @@ class DockerConversationRegistry(ConversationRegistry):
                 ("--pids-limit", str(self.config.conversation_container_pids_limit))
             )
 
-        name = f"agent-server-conversation-{uuid4()}"
+        # Named after its conversation, so a deployment can find it; a leftover
+        # container of the same conversation is removed first.
+        name = f"agent-server-conversation-{conversation_id}"
+        execute_command(["docker", "rm", "-f", name])
         command = [
             "docker",
             "run",
