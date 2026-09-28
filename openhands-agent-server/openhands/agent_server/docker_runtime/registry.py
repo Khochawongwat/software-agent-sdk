@@ -66,6 +66,7 @@ _RUNTIME_ENV = (
     "OH_SECRET_KEY",
     V1_SESSION_API_KEY_ENV,
     "OH_RUNTIME_LAUNCHED_PROFILE",
+    "OH_BASH_EVENTS_DIR",
 )
 
 
@@ -563,6 +564,9 @@ class DockerConversationRegistry(ConversationRegistry):
                     if identity.launched_agent_profile
                     else ""
                 ),
+                # The default, workspace/bash_events, lands in /workspace: the
+                # mounted repo, where the command log would show as new files.
+                "OH_BASH_EVENTS_DIR": f"{_PERSISTENCE_DIR}/bash_events",
             }
         )
         if "DEBUG" in os.environ:
