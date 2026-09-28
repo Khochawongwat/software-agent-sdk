@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -160,6 +162,40 @@ async def _set_title(
         )
 
 
+# ponytail: one fixed limit; make it a setting if a workspace takes longer.
+WORKSPACE_COMMAND_TIMEOUT_S = 600
+
+
+class WorkspaceCommandError(Exception):
+    """The workspace command failed or printed no usable directory."""
+
+
+def prepare_workspace(
+    command: list[str], working_dir: Path, conversation_id: UUID, tags: object
+) -> Path:
+    """Run ``conversation_workspace_command``; the directory it printed."""
+    try:
+        result = subprocess.run(
+            [*command, str(working_dir), str(conversation_id)],
+            capture_output=True,
+            text=True,
+            timeout=WORKSPACE_COMMAND_TIMEOUT_S,
+            env={**os.environ, "OH_CONVERSATION_TAGS": json.dumps(tags or {})},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkspaceCommandError(f"Workspace command could not run: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-500:]
+        raise WorkspaceCommandError(f"Workspace command failed: {detail}")
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    workspace = Path(lines[-1]) if lines else None
+    if workspace is None or not workspace.is_absolute() or not workspace.is_dir():
+        raise WorkspaceCommandError(
+            "Workspace command did not print an existing absolute directory"
+        )
+    return workspace
+
+
 docker_conversation_router = APIRouter(
     prefix="/conversations", tags=["Docker Conversations"]
 )
@@ -196,6 +232,22 @@ async def start_conversation(
     body["workspace"] = {"kind": "LocalWorkspace", "working_dir": "/workspace"}
 
     registry = get_registry(request)
+    command = registry.config.conversation_workspace_command
+    if host_workspace is not None and command:
+        if registry.provisioning.manifest_path(conversation_id).is_file():
+            # Made when the conversation first started; that one stays.
+            host_workspace = None
+        else:
+            try:
+                host_workspace = await asyncio.to_thread(
+                    prepare_workspace,
+                    command,
+                    host_workspace,
+                    conversation_id,
+                    body.get("tags"),
+                )
+            except WorkspaceCommandError as exc:
+                raise HTTPException(502, str(exc)) from exc
     try:
         prepared, launched = await prepare_start(body, registry.config)
         # The outer server titles the conversation (_set_title): the
