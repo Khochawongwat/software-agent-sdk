@@ -689,9 +689,8 @@ async def test_a_resume_waits_until_the_new_container_has_loaded_the_conversatio
     calls: list[tuple[str, int]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
-        # The conversation is loaded from the third GET on.
-        gets = sum(1 for method, _ in calls if method == "GET")
-        status = 200 if request.method == "POST" or gets >= 2 else 404
+        # The conversation is loaded from the third request on.
+        status = 200 if len(calls) >= 2 else 404
         calls.append((request.method, status))
         return httpx.Response(status, json={"success": True})
 
@@ -699,4 +698,4 @@ async def test_a_resume_waits_until_the_new_container_has_loaded_the_conversatio
 
     await runtime._send_message(container(conversation_id), conversation_id, RESUME)
 
-    assert calls == [("GET", 404), ("GET", 404), ("GET", 200), ("POST", 200)]
+    assert calls == [("POST", 404), ("POST", 404), ("POST", 200)]

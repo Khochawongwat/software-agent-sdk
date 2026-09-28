@@ -455,24 +455,22 @@ class DockerConversationRegistry(ConversationRegistry):
     async def _send_message(
         self, container: ConversationContainer, conversation_id: UUID, text: str | None
     ) -> None:
-        url = f"{container.host}/api/conversations/{conversation_id}"
+        url = f"{container.host}/api/conversations/{conversation_id}/events"
+        message = {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+            "run": True,
+        }
         headers = {"X-Session-API-Key": container.api_key}
         async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
-            # A new container is healthy before it has loaded the conversation;
-            # until then its routes answer 404.
+            # A new container answers its health check, and even GET for the
+            # conversation, before it has loaded the conversation to run it;
+            # until then this route answers 404, which changes nothing.
             for _ in range(_LOAD_WAIT_TRIES):
-                if (await client.get(url, headers=headers)).status_code == 200:
+                response = await client.post(url, headers=headers, json=message)
+                if response.status_code != 404:
                     break
                 await asyncio.sleep(_LOAD_WAIT_INTERVAL_SECONDS)
-            response = await client.post(
-                f"{url}/events",
-                headers=headers,
-                json={
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                    "run": True,
-                },
-            )
         response.raise_for_status()
 
     async def _evict_idle_runtimes_loop(self) -> None:
