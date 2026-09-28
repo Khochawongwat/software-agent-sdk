@@ -68,6 +68,14 @@ class ConversationRuntimeInfo(BaseModel):
     runtime_status: ConversationRuntimeStatus
     can_resume: bool
     runtime_error: ConversationRuntimeError | None = None
+    workspace_url: str | None = Field(
+        default=None,
+        description=(
+            "Path on this server of the conversation's own runtime API, when it "
+            "runs elsewhere (a Docker container): send workspace calls such as "
+            "files, git and commands to <workspace_url>/api/..."
+        ),
+    )
 
 
 class ServerErrorEvent(Event):

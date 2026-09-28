@@ -524,6 +524,7 @@ async def test_a_container_that_died_is_reported_as_an_error(tmp_path, monkeypat
             code="container_exited",
             message="The conversation's container stopped unexpectedly.",
         ),
+        workspace_url=f"/api/runtimes/{conversation_id}",
     )
 
 
@@ -554,7 +555,9 @@ async def test_after_a_new_container_a_normal_stop_is_not_an_error(
     await runtime.stop(conversation_id)
 
     assert runtime.runtime_info(conversation_id) == ConversationRuntimeInfo(
-        runtime_status=ConversationRuntimeStatus.MISSING, can_resume=True
+        runtime_status=ConversationRuntimeStatus.MISSING,
+        can_resume=True,
+        workspace_url=f"/api/runtimes/{conversation_id}",
     )
 
 

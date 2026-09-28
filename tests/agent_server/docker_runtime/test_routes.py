@@ -22,6 +22,7 @@ from openhands.agent_server.docker_runtime.registry import DockerConversationReg
 from openhands.agent_server.docker_runtime.routers import (
     delete_conversation,
     docker_conversation_router,
+    docker_runtime_router,
     proxy_conversation,
 )
 from openhands.agent_server.event_router import event_read_router
@@ -212,12 +213,14 @@ def test_runtime_info_marks_legacy_local_conversation_non_resumable(
         "runtime_status": "missing",
         "can_resume": False,
         "runtime_error": None,
+        "workspace_url": None,
     }
     assert docker.status_code == 200
     assert docker.json() == {
         "runtime_status": "missing",
         "can_resume": True,
         "runtime_error": None,
+        "workspace_url": f"/api/runtimes/{docker_id}",
     }
 
 
@@ -541,3 +544,38 @@ async def test_title_uses_the_outer_servers_title_profile(tmp_path, monkeypatch)
     await _start(tmp_path, monkeypatch, _start_body(title_llm_profile="titles"))
 
     assert used == ["title-model"]
+
+
+def test_runtime_api_reaches_the_containers_own_api(tmp_path, monkeypatch):
+    config = Config(
+        conversations_path=tmp_path / "conversations",
+        secret_key=SecretStr("outer-key"),
+    )
+    app = FastAPI()
+    app.state.conversation_registry = DockerConversationRegistry(config)
+    app.state.conversation_service = AsyncMock()
+    app.include_router(docker_runtime_router, prefix="/api")
+    conversation_id = uuid4()
+    captured = {}
+
+    async def container(*_args):
+        return SimpleNamespace(host="http://inner", api_key="inner-key")
+
+    async def proxy(*_args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(
+        "openhands.agent_server.docker_runtime.routers._container", container
+    )
+    monkeypatch.setattr(
+        "openhands.agent_server.docker_runtime.routers.proxy_http", proxy
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/runtimes/{conversation_id}/api/git/changes?path=/workspace"
+        )
+
+    assert response.status_code == 200
+    assert captured["upstream_path"] == "/api/git/changes?path=%2Fworkspace"
