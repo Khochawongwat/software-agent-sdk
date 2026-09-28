@@ -615,15 +615,47 @@ async def test_a_turn_whose_container_died_is_resumed_once_an_hour(
     runtime, sent = resuming_runtime(tmp_path, monkeypatch)
     conversation_id = uuid4()
     runtime.provisioning.create(conversation_id)
-    set_execution_status(runtime, ConversationExecutionStatus.RUNNING)
-    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set())
+    alive = {f"container-{conversation_id}"}
+    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set(alive))
+
+    async def turn_running(conversation_id, container):
+        return True
+
+    monkeypatch.setattr(runtime, "_turn_running", turn_running)
 
     for _ in range(2):
+        alive.add(f"container-{conversation_id}")
         runtime._containers[conversation_id] = container(conversation_id)
-        await runtime.check_containers()
+        await runtime.check_containers()  # alive, running a turn
+        alive.clear()
+        await runtime.check_containers()  # died
         await asyncio.gather(*runtime._resumes)
 
     assert sent == [(conversation_id, RESUME)]
+
+
+@pytest.mark.asyncio
+async def test_an_idle_conversation_whose_container_died_is_not_resumed(
+    tmp_path, monkeypatch
+):
+    runtime, sent = resuming_runtime(tmp_path, monkeypatch)
+    conversation_id = uuid4()
+    runtime.provisioning.create(conversation_id)
+    alive = {f"container-{conversation_id}"}
+    monkeypatch.setattr(runtime, "_running_container_ids", lambda: set(alive))
+
+    async def turn_running(conversation_id, container):
+        return False
+
+    monkeypatch.setattr(runtime, "_turn_running", turn_running)
+    runtime._containers[conversation_id] = container(conversation_id)
+
+    await runtime.check_containers()
+    alive.clear()
+    await runtime.check_containers()
+    await asyncio.gather(*runtime._resumes)
+
+    assert sent == []
 
 
 @pytest.mark.asyncio
