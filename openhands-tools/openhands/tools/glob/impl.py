@@ -17,6 +17,7 @@ from openhands.tools.glob.definition import GlobAction, GlobObservation
 from openhands.tools.utils import (
     _check_ripgrep_available,
     _log_ripgrep_fallback_warning,
+    truncation_note,
 )
 
 
@@ -102,17 +103,14 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
                     f"'{original_pattern}' in '{search_path}':\n{file_list}"
                 )
                 if truncated:
-                    content += (
-                        "\n\n[Results truncated to first 100 files. "
-                        "Consider using a more specific pattern.]"
-                    )
+                    content += f"\n\n{truncated}"
 
             return GlobObservation.from_text(
                 text=content,
                 files=files,
                 pattern=original_pattern,
                 search_path=str(search_path),
-                truncated=truncated,
+                truncated=bool(truncated),
             )
 
         except Exception as e:
@@ -135,7 +133,7 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
 
     def _execute_with_ripgrep(
         self, pattern: str, search_path: Path
-    ) -> tuple[list[str], bool]:
+    ) -> tuple[list[str], str]:
         """Execute glob pattern matching using ripgrep.
 
         Args:
@@ -143,8 +141,9 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             search_path: The directory to search in
 
         Returns:
-            Tuple of (file_paths, truncated) where file_paths is a list of matching files
-            and truncated is True if results were limited to 100 files
+            Tuple of (file_paths, truncated) where file_paths is the first 100
+            matching files and truncated is a note on all of them when there were
+            more (see truncation_note), else empty
         """  # noqa: E501
         search_path = search_path.resolve()
 
@@ -170,23 +169,18 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             cwd=search_path,
         )
 
-        # Parse output into file paths
-        file_paths = []
-        if result.stdout:
-            for line in result.stdout.strip().split("\n"):
-                if line:
-                    file_paths.append(str(Path(line).resolve()))
-                    # Limit to first 100 files
-                    if len(file_paths) >= 100:
-                        break
-
-        truncated = len(file_paths) >= 100
+        # Parse output into file paths; show the first 100
+        file_paths = [
+            str(Path(line).resolve()) for line in result.stdout.splitlines() if line
+        ]
+        truncated = truncation_note(file_paths, search_path, 100)
+        file_paths = file_paths[:100]
 
         return file_paths, truncated
 
     def _execute_with_glob(
         self, pattern: str, search_path: Path
-    ) -> tuple[list[str], bool]:
+    ) -> tuple[list[str], str]:
         """Execute glob pattern matching using Python's glob module.
 
         Args:
@@ -194,8 +188,9 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             search_path: The directory to search in
 
         Returns:
-            Tuple of (file_paths, truncated) where file_paths is a list of matching files
-            and truncated is True if results were limited to 100 files
+            Tuple of (file_paths, truncated) where file_paths is the first 100
+            matching files and truncated is a note on all of them when there were
+            more (see truncation_note), else empty
         """  # noqa: E501
         search_path = search_path.resolve()
 
@@ -226,7 +221,9 @@ class GlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
             file_paths.sort(key=lambda x: x[1], reverse=True)
             sorted_files = [path for path, _ in file_paths[:100]]
 
-            truncated = len(file_paths) > 100
+            truncated = truncation_note(
+                [path for path, _ in file_paths], search_path, 100
+            )
 
             return sorted_files, truncated
         finally:
