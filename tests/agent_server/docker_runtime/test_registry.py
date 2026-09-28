@@ -673,3 +673,30 @@ async def test_without_a_resume_message_nothing_is_noted_or_resumed(
     await runtime.shutdown()
 
     assert (sent, runtime._interrupted_path.exists()) == ([], False)
+
+
+@pytest.mark.asyncio
+async def test_a_resume_waits_until_the_new_container_has_loaded_the_conversation(
+    tmp_path, monkeypatch
+):
+    import httpx
+
+    runtime = registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "openhands.agent_server.docker_runtime.registry._LOAD_WAIT_INTERVAL_SECONDS", 0
+    )
+    conversation_id = uuid4()
+    calls: list[tuple[str, int]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        # The conversation is loaded from the third GET on.
+        gets = sum(1 for method, _ in calls if method == "GET")
+        status = 200 if request.method == "POST" or gets >= 2 else 404
+        calls.append((request.method, status))
+        return httpx.Response(status, json={"success": True})
+
+    runtime._transport = httpx.MockTransport(handle)
+
+    await runtime._send_message(container(conversation_id), conversation_id, RESUME)
+
+    assert calls == [("GET", 404), ("GET", 404), ("GET", 200), ("POST", 200)]

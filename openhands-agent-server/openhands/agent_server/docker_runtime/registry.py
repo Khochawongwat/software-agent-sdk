@@ -51,6 +51,8 @@ _CONVERSATION_LABEL = "ai.openhands.conversation-id"
 # ponytail: polling can't tell the exit code or OOM; `docker events` can.
 _WATCH_INTERVAL_SECONDS = 10.0
 _RESUME_AT_MOST_EVERY_SECONDS = 3600.0
+_LOAD_WAIT_TRIES = 60
+_LOAD_WAIT_INTERVAL_SECONDS = 1.0
 _CONTAINER_EXITED = ConversationRuntimeError(
     code="container_exited",
     message="The conversation's container stopped unexpectedly.",
@@ -109,6 +111,8 @@ class DockerConversationRegistry(ConversationRegistry):
         self._resumed: dict[UUID, float] = {}
         # Conversations running a turn at the last check (resume on crash).
         self._turns: set[UUID] = set()
+        # Tests replace it to fake the containers' HTTP.
+        self._transport: httpx.AsyncBaseTransport | None = None
         self._resumes: set[asyncio.Task[None]] = set()
 
     def configure_service(self, service: ConversationService) -> None:
@@ -451,10 +455,18 @@ class DockerConversationRegistry(ConversationRegistry):
     async def _send_message(
         self, container: ConversationContainer, conversation_id: UUID, text: str | None
     ) -> None:
-        async with httpx.AsyncClient(timeout=60) as client:
+        url = f"{container.host}/api/conversations/{conversation_id}"
+        headers = {"X-Session-API-Key": container.api_key}
+        async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+            # A new container is healthy before it has loaded the conversation;
+            # until then its routes answer 404.
+            for _ in range(_LOAD_WAIT_TRIES):
+                if (await client.get(url, headers=headers)).status_code == 200:
+                    break
+                await asyncio.sleep(_LOAD_WAIT_INTERVAL_SECONDS)
             response = await client.post(
-                f"{container.host}/api/conversations/{conversation_id}/events",
-                headers={"X-Session-API-Key": container.api_key},
+                f"{url}/events",
+                headers=headers,
                 json={
                     "role": "user",
                     "content": [{"type": "text", "text": text}],
